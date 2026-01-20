@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WordPress Export Viewer</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .prose { max-width: 65ch; }
+    .prose p { margin-bottom: 1em; }
+    .prose ul, .prose ol { margin-left: 1.5em; margin-bottom: 1em; }
+    .prose li { margin-bottom: 0.5em; }
+    .line-clamp-3 {
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body class="bg-gray-50">
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    const { useState, useCallback } = React;
+
+    // Parse WordPress XML export
+    function parseWordPressXML(xmlString) {
+      const parser = new DOMParser();
+      const xmlDoc = parser.parseFromString(xmlString, 'text/xml');
+      
+      // Check for parse errors
+      const parseError = xmlDoc.querySelector('parsererror');
+      if (parseError) {
+        throw new Error('Invalid XML file');
+      }
+
+      const channel = xmlDoc.querySelector('channel');
+      if (!channel) {
+        throw new Error('Invalid WordPress export format');
+      }
+
+      // Get site info
+      const siteInfo = {
+        title: getTextContent(channel, 'title'),
+        link: getTextContent(channel, 'link'),
+        description: getTextContent(channel, 'description'),
+        language: getTextContent(channel, 'language'),
+      };
+
+      // Get authors
+      const authorElements = channel.querySelectorAll('author');
+      const authors = {};
+      authorElements.forEach(author => {
+        const login = getCDataContent(author, 'author_login');
+        authors[login] = {
+          id: getTextContent(author, 'author_id'),
+          login: login,
+          email: getCDataContent(author, 'author_email'),
+          displayName: getCDataContent(author, 'author_display_name'),
+          firstName: getCDataContent(author, 'author_first_name'),
+          lastName: getCDataContent(author, 'author_last_name'),
+        };
+      });
+
+      // Get posts
+      const items = channel.querySelectorAll('item');
+      const posts = [];
+      
+      items.forEach(item => {
+        const postType = getCDataContent(item, 'post_type');
+        if (postType !== 'post') return; // Only get actual posts
+        
+        const status = getCDataContent(item, 'status');
+        
+        // Get categories
+        const categoryElements = item.querySelectorAll('category');
+        const categories = [];
+        categoryElements.forEach(cat => {
+          if (cat.getAttribute('domain') === 'category') {
+            categories.push(cat.textContent);
+          }
+        });
+
+        const creator = getCDataContent(item, 'creator');
+        
+        posts.push({
+          id: getTextContent(item, 'post_id'),
+          title: getCDataContent(item, 'title'),
+          link: getTextContent(item, 'link'),
+          pubDate: getTextContent(item, 'pubDate'),
+          creator: creator,
+          authorName: authors[creator]?.displayName || creator,
+          content: getCDataContent(item, 'encoded', 'content'),
+          excerpt: getCDataContent(item, 'encoded', 'excerpt'),
+          postDate: getCDataContent(item, 'post_date'),
+          status: status,
+          categories: categories,
+        });
+      });
+
+      // Sort by date (newest first)
+      posts.sort((a, b) => new Date(b.postDate) - new Date(a.postDate));
+
+      return { siteInfo, authors, posts };
+    }
+
+    function getTextContent(parent, tagName) {
+      const el = parent.querySelector(tagName);
+      return el ? el.textContent : '';
+    }
+
+    function getCDataContent(parent, tagName, namespace = null) {
+      let el;
+      if (namespace) {
+        // For namespaced elements like content:encoded
+        el = Array.from(parent.children).find(child => 
+          child.localName === tagName && child.namespaceURI?.includes(namespace)
+        );
+      } else {
+        el = Array.from(parent.children).find(child => 
+          child.localName === tagName || child.tagName.endsWith(':' + tagName)
+        );
+      }
+      return el ? el.textContent : '';
+    }
+
+    // Export to JSON
+    function exportToJSON(posts, siteInfo) {
+      const exportData = {
+        siteInfo,
+        exportedAt: new Date().toISOString(),
+        postCount: posts.length,
+        posts: posts.map(post => ({
+          id: post.id,
+          title: post.title,
+          link: post.link,
+          author: post.authorName,
+          publishDate: post.postDate,
+          status: post.status,
+          categories: post.categories,
+          content: post.content,
+          excerpt: post.excerpt
+        }))
+      };
+      
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+      downloadBlob(blob, `wordpress-export-${Date.now()}.json`);
+    }
+
+    // Export to CSV
+    function exportToCSV(posts) {
+      const headers = ['ID', 'Title', 'Author', 'Publish Date', 'Status', 'Categories', 'Link', 'Content Preview'];
+      
+      const escapeCSV = (str) => {
+        if (str === null || str === undefined) return '';
+        const stringVal = String(str);
+        if (stringVal.includes(',') || stringVal.includes('"') || stringVal.includes('\n')) {
+          return `"${stringVal.replace(/"/g, '""')}"`;
+        }
+        return stringVal;
+      };
+      
+      const rows = posts.map(post => [
+        post.id,
+        post.title,
+        post.authorName,
+        post.postDate,
+        post.status,
+        post.categories.join('; '),
+        post.link,
+        stripHtml(post.content).substring(0, 500).replace(/\n/g, ' ')
+      ].map(escapeCSV).join(','));
+      
+      const csv = [headers.join(','), ...rows].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      downloadBlob(blob, `wordpress-export-${Date.now()}.csv`);
+    }
+
+    // Download helper
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
+
+    // Format date nicely
+    function formatDate(dateString) {
+      if (!dateString) return '';
+      const date = new Date(dateString);
+      return date.toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      });
+    }
+
+    // Strip HTML tags for preview
+    function stripHtml(html) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      return tmp.textContent || tmp.innerText || '';
+    }
+
+    // Main App Component
+    function App() {
+      const [data, setData] = useState(null);
+      const [selectedPost, setSelectedPost] = useState(null);
+      const [searchTerm, setSearchTerm] = useState('');
+      const [selectedCategory, setSelectedCategory] = useState('all');
+      const [statusFilter, setStatusFilter] = useState('all');
+      const [error, setError] = useState(null);
+      const [isDragging, setIsDragging] = useState(false);
+
+      const handleFile = useCallback((file) => {
+        if (!file) return;
+        
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try {
+            const result = parseWordPressXML(e.target.result);
+            setData(result);
+            setError(null);
+            setSelectedPost(null);
+          } catch (err) {
+            setError(err.message);
+            setData(null);
+          }
+        };
+        reader.readAsText(file);
+      }, []);
+
+      const handleDrop = useCallback((e) => {
+        e.preventDefault();
+        setIsDragging(false);
+        const file = e.dataTransfer.files[0];
+        if (file && file.name.endsWith('.xml')) {
+          handleFile(file);
+        } else {
+          setError('Please upload an XML file');
+        }
+      }, [handleFile]);
+
+      const handleDragOver = useCallback((e) => {
+        e.preventDefault();
+        setIsDragging(true);
+      }, []);
+
+      const handleDragLeave = useCallback((e) => {
+        e.preventDefault();
+        setIsDragging(false);
+      }, []);
+
+      // Get unique categories
+      const allCategories = data ? [...new Set(data.posts.flatMap(p => p.categories))].sort() : [];
+      
+      // Get unique statuses
+      const allStatuses = data ? [...new Set(data.posts.map(p => p.status))].sort() : [];
+
+      // Filter posts
+      const filteredPosts = data?.posts.filter(post => {
+        const matchesSearch = searchTerm === '' || 
+          post.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          stripHtml(post.content).toLowerCase().includes(searchTerm.toLowerCase());
+        const matchesCategory = selectedCategory === 'all' || post.categories.includes(selectedCategory);
+        const matchesStatus = statusFilter === 'all' || post.status === statusFilter;
+        return matchesSearch && matchesCategory && matchesStatus;
+      }) || [];
+
+      // Upload Screen
+      if (!data) {
+        return (
+          <div className="min-h-screen flex items-center justify-center p-8">
+            <div 
+              className={`w-full max-w-xl p-12 border-2 border-dashed rounded-2xl text-center transition-colors ${
+                isDragging ? 'border-blue-500 bg-blue-50' : 'border-gray-300 bg-white'
+              }`}
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+            >
+              <div className="mb-6">
+                <svg className="mx-auto h-16 w-16 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                </svg>
+              </div>
+              <h1 className="text-2xl font-bold text-gray-900 mb-2">WordPress Export Viewer</h1>
+              <p className="text-gray-600 mb-6">Drop your WordPress XML export file here or click to browse</p>
+              <input
+                type="file"
+                accept=".xml"
+                onChange={(e) => handleFile(e.target.files[0])}
+                className="hidden"
+                id="file-input"
+              />
+              <label
+                htmlFor="file-input"
+                className="inline-flex items-center px-6 py-3 bg-blue-600 text-white font-medium rounded-lg cursor-pointer hover:bg-blue-700 transition-colors"
+              >
+                Select XML File
+              </label>
+              {error && (
+                <div className="mt-6 p-4 bg-red-50 text-red-700 rounded-lg">
+                  {error}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      // Post Detail View
+      if (selectedPost) {
+        return (
+          <div className="min-h-screen bg-white">
+            <div className="sticky top-0 bg-white border-b border-gray-200 z-10">
+              <div className="max-w-4xl mx-auto px-6 py-4 flex items-center gap-4">
+                <button
+                  onClick={() => setSelectedPost(null)}
+                  className="flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                  </svg>
+                  Back to posts
+                </button>
+              </div>
+            </div>
+            <article className="max-w-4xl mx-auto px-6 py-8">
+              <header className="mb-8">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className={`px-2 py-1 text-xs font-medium rounded ${
+                    selectedPost.status === 'publish' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+                  }`}>
+                    {selectedPost.status}
+                  </span>
+                  {selectedPost.categories.map(cat => (
+                    <span key={cat} className="px-2 py-1 text-xs font-medium bg-gray-100 text-gray-600 rounded">
+                      {cat}
+                    </span>
+                  ))}
+                </div>
+                <h1 className="text-4xl font-bold text-gray-900 mb-4">{selectedPost.title}</h1>
+                <div className="flex items-center gap-4 text-gray-600">
+                  <span>{selectedPost.authorName}</span>
+                  <span>•</span>
+                  <time>{formatDate(selectedPost.postDate)}</time>
+                </div>
+              </header>
+              <div 
+                className="prose prose-lg max-w-none"
+                dangerouslySetInnerHTML={{ __html: selectedPost.content.replace(/\n/g, '<br>') }}
+              />
+              {selectedPost.link && (
+                <div className="mt-8 pt-8 border-t border-gray-200">
+                  <a 
+                    href={selectedPost.link} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="text-blue-600 hover:text-blue-800"
+                  >
+                    View original post →
+                  </a>
+                </div>
+              )}
+            </article>
+          </div>
+        );
+      }
+
+      // Posts List View
+      return (
+        <div className="min-h-screen">
+          {/* Header */}
+          <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
+            <div className="max-w-6xl mx-auto px-6 py-4">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h1 className="text-2xl font-bold text-gray-900">{data.siteInfo.title}</h1>
+                  <p className="text-gray-600 text-sm">{data.siteInfo.description}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                <div className="relative group">
+                  <button
+                    className="px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                    Export
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  <div className="absolute right-0 mt-1 w-48 bg-white border border-gray-200 rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-20">
+                    <button
+                      onClick={() => exportToJSON(filteredPosts, data.siteInfo)}
+                      className="w-full px-4 py-3 text-left text-gray-700 hover:bg-gray-50 rounded-t-lg flex items-center gap-3"
+                    >
+                      <span className="text-lg">{ }</span>
+                      <div>
+                        <div className="font-medium">Export as JSON</div>
+                        <div className="text-xs text-gray-500">Full data with content</div>
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => exportToCSV(filteredPosts)}
+                      className="w-full px-4 py-3 text-left text-gray-700 hover:bg-gray-50 rounded-b-lg border-t border-gray-100 flex items-center gap-3"
+                    >
+                      <span className="text-lg">📊</span>
+                      <div>
+                        <div className="font-medium">Export as CSV</div>
+                        <div className="text-xs text-gray-500">Spreadsheet compatible</div>
+                      </div>
+                    </button>
+                  </div>
+                </div>
+                <button
+                  onClick={() => { setData(null); setError(null); }}
+                  className="px-4 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+                >
+                  Load Different File
+                </button>
+              </div>
+              </div>
+              
+              {/* Filters */}
+              <div className="flex flex-wrap gap-4">
+                <div className="flex-1 min-w-[200px]">
+                  <input
+                    type="text"
+                    placeholder="Search posts..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                  />
+                </div>
+                <select
+                  value={selectedCategory}
+                  onChange={(e) => setSelectedCategory(e.target.value)}
+                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
+                >
+                  <option value="all">All Categories</option>
+                  {allCategories.map(cat => (
+                    <option key={cat} value={cat}>{cat}</option>
+                  ))}
+                </select>
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value)}
+                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
+                >
+                  <option value="all">All Statuses</option>
+                  {allStatuses.map(status => (
+                    <option key={status} value={status}>{status}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </header>
+
+          {/* Stats */}
+          <div className="max-w-6xl mx-auto px-6 py-4">
+            <div className="flex gap-6 text-sm text-gray-600">
+              <span><strong>{filteredPosts.length}</strong> posts</span>
+              <span><strong>{Object.keys(data.authors).length}</strong> authors</span>
+              <span><strong>{allCategories.length}</strong> categories</span>
+            </div>
+          </div>
+
+          {/* Posts Grid */}
+          <main className="max-w-6xl mx-auto px-6 pb-12">
+            {filteredPosts.length === 0 ? (
+              <div className="text-center py-12 text-gray-500">
+                No posts found matching your criteria
+              </div>
+            ) : (
+              <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+                {filteredPosts.map(post => (
+                  <article
+                    key={post.id}
+                    onClick={() => setSelectedPost(post)}
+                    className="bg-white rounded-xl border border-gray-200 p-6 cursor-pointer hover:shadow-lg hover:border-gray-300 transition-all"
+                  >
+                    <div className="flex items-center gap-2 mb-3">
+                      <span className={`px-2 py-0.5 text-xs font-medium rounded ${
+                        post.status === 'publish' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+                      }`}>
+                        {post.status}
+                      </span>
+                      {post.categories.slice(0, 2).map(cat => (
+                        <span key={cat} className="px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600 rounded">
+                          {cat}
+                        </span>
+                      ))}
+                    </div>
+                    <h2 className="text-lg font-semibold text-gray-900 mb-2 line-clamp-2">
+                      {post.title}
+                    </h2>
+                    <p className="text-gray-600 text-sm mb-4 line-clamp-3">
+                      {stripHtml(post.content).substring(0, 200)}...
+                    </p>
+                    <div className="flex items-center justify-between text-xs text-gray-500">
+                      <span>{post.authorName}</span>
+                      <time>{formatDate(post.postDate)}</time>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </main>
+        </div>
+      );
+    }
+
+    // Render the app
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>

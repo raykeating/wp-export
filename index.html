@@ -8,29 +8,15 @@
   <meta name="keywords" content="wordpress to csv, wordpress to json, export wordpress posts, wordpress xml converter, wordpress export tool, convert wordpress xml, wordpress post exporter, wp export, wordpress migration tool">
   <meta name="author" content="Ray Keating">
   <meta name="robots" content="index, follow">
-  
-  <!-- Open Graph / Social -->
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://wp-export.com/">
   <meta property="og:title" content="WP Export - Convert WordPress Posts to JSON & CSV">
   <meta property="og:description" content="Free online tool to convert WordPress XML exports to JSON or CSV. No signup required.">
   <meta property="og:site_name" content="WP Export">
-  
-  <!-- Twitter -->
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="WP Export - Convert WordPress Posts to JSON & CSV">
   <meta name="twitter:description" content="Free online tool to convert WordPress XML exports to JSON or CSV. No signup required.">
-  
-  <!-- Canonical -->
   <link rel="canonical" href="https://wp-export.com/">
-  
-  <!-- Favicon -->
-  <link rel="icon" type="image/x-icon" href="/favicon.ico">
-  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
-  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
-  <link rel="manifest" href="/site.webmanifest">
-  
   <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -40,49 +26,24 @@
     .prose p { margin-bottom: 1em; }
     .prose ul, .prose ol { margin-left: 1.5em; margin-bottom: 1em; }
     .prose li { margin-bottom: 0.5em; }
-    .line-clamp-3 {
-      display: -webkit-box;
-      -webkit-line-clamp: 3;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-    }
+    .line-clamp-2, .line-clamp-3 { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+    .line-clamp-2 { -webkit-line-clamp: 2; }
+    .line-clamp-3 { -webkit-line-clamp: 3; }
   </style>
-
-  
-  <!-- Google tag (gtag.js) -->
-  <script async src="https://www.googletagmanager.com/gtag/js?id=G-X866SVE16K"></script>
-  <script>
-    window.dataLayer = window.dataLayer || [];
-    function gtag(){dataLayer.push(arguments);}
-    gtag('js', new Date());
-  
-    gtag('config', 'G-X866SVE16K');
-  </script>
-
 </head>
 <body class="bg-gray-50">
   <div id="root"></div>
-  
   <script type="text/babel">
     const { useState, useCallback } = React;
 
-    // Parse WordPress XML export
     function parseWordPressXML(xmlString) {
       const parser = new DOMParser();
       const xmlDoc = parser.parseFromString(xmlString, 'text/xml');
-      
-      // Check for parse errors
       const parseError = xmlDoc.querySelector('parsererror');
-      if (parseError) {
-        throw new Error('Invalid XML file');
-      }
-
+      if (parseError) throw new Error('Invalid XML file');
       const channel = xmlDoc.querySelector('channel');
-      if (!channel) {
-        throw new Error('Invalid WordPress export format');
-      }
+      if (!channel) throw new Error('Invalid WordPress export format');
 
-      // Get site info
       const siteInfo = {
         title: getTextContent(channel, 'title'),
         link: getTextContent(channel, 'link'),
@@ -90,61 +51,91 @@
         language: getTextContent(channel, 'language'),
       };
 
-      // Get authors
       const authorElements = channel.querySelectorAll('author');
       const authors = {};
       authorElements.forEach(author => {
         const login = getCDataContent(author, 'author_login');
         authors[login] = {
           id: getTextContent(author, 'author_id'),
-          login: login,
-          email: getCDataContent(author, 'author_email'),
+          login, email: getCDataContent(author, 'author_email'),
           displayName: getCDataContent(author, 'author_display_name'),
           firstName: getCDataContent(author, 'author_first_name'),
           lastName: getCDataContent(author, 'author_last_name'),
         };
       });
 
-      // Get posts
       const items = channel.querySelectorAll('item');
       const posts = [];
+      const attachments = {};
       
       items.forEach(item => {
         const postType = getCDataContent(item, 'post_type');
-        if (postType !== 'post') return; // Only get actual posts
+        if (postType === 'attachment') {
+          const id = getTextContent(item, 'post_id');
+          attachments[id] = {
+            id, title: getCDataContent(item, 'title'),
+            url: getCDataContent(item, 'attachment_url'),
+            parentId: getTextContent(item, 'post_parent'),
+            altText: getPostMeta(item, '_wp_attachment_image_alt'),
+          };
+        }
+      });
+      
+      items.forEach(item => {
+        const postType = getCDataContent(item, 'post_type');
+        if (postType !== 'post') return;
         
-        const status = getCDataContent(item, 'status');
-        
-        // Get categories
-        const categoryElements = item.querySelectorAll('category');
-        const categories = [];
-        categoryElements.forEach(cat => {
-          if (cat.getAttribute('domain') === 'category') {
-            categories.push(cat.textContent);
-          }
-        });
-
+        const postId = getTextContent(item, 'post_id');
+        const thumbnailId = getPostMeta(item, '_thumbnail_id');
         const creator = getCDataContent(item, 'creator');
         
+        const categoryElements = item.querySelectorAll('category');
+        const categories = [], tags = [];
+        categoryElements.forEach(cat => {
+          const domain = cat.getAttribute('domain');
+          const nicename = cat.getAttribute('nicename');
+          const name = cat.textContent;
+          if (domain === 'category') categories.push({ name, slug: nicename });
+          else if (domain === 'post_tag') tags.push({ name, slug: nicename });
+        });
+
+        const allMeta = getAllPostMeta(item);
+        const customFields = {};
+        const internalPrefixes = ['_edit_', '_wp_', '_thumbnail', '_elementor', '_eael', '_aioseop', '_aioseo', '_pa_', '_yoast'];
+        Object.entries(allMeta).forEach(([key, value]) => {
+          const isInternal = internalPrefixes.some(prefix => key.startsWith(prefix));
+          if (!isInternal && !key.startsWith('_')) customFields[key] = value;
+        });
+
+        const featuredImage = thumbnailId && attachments[thumbnailId] ? {
+          id: thumbnailId, url: attachments[thumbnailId].url,
+          alt: attachments[thumbnailId].altText, title: attachments[thumbnailId].title,
+        } : null;
+
         posts.push({
-          id: getTextContent(item, 'post_id'),
-          title: getCDataContent(item, 'title'),
-          link: getTextContent(item, 'link'),
-          pubDate: getTextContent(item, 'pubDate'),
-          creator: creator,
-          authorName: authors[creator]?.displayName || creator,
+          id: postId, title: getCDataContent(item, 'title'),
+          slug: getCDataContent(item, 'post_name'), link: getTextContent(item, 'link'),
+          guid: getTextContent(item, 'guid'), postDate: getCDataContent(item, 'post_date'),
+          postDateGmt: getCDataContent(item, 'post_date_gmt'),
+          modifiedDate: getCDataContent(item, 'post_modified'),
+          modifiedDateGmt: getCDataContent(item, 'post_modified_gmt'),
+          creator, authorName: authors[creator]?.displayName || creator,
+          authorEmail: authors[creator]?.email || '',
           content: getCDataContent(item, 'encoded', 'content'),
           excerpt: getCDataContent(item, 'encoded', 'excerpt'),
-          postDate: getCDataContent(item, 'post_date'),
-          status: status,
-          categories: categories,
+          status: getCDataContent(item, 'status'),
+          commentStatus: getCDataContent(item, 'comment_status'),
+          pingStatus: getCDataContent(item, 'ping_status'),
+          postPassword: getCDataContent(item, 'post_password'),
+          isSticky: getTextContent(item, 'is_sticky') === '1',
+          menuOrder: parseInt(getTextContent(item, 'menu_order')) || 0,
+          parentId: getTextContent(item, 'post_parent'),
+          categories, tags, featuredImage, customFields, allMeta,
         });
       });
 
-      // Sort by date (newest first)
       posts.sort((a, b) => new Date(b.postDate) - new Date(a.postDate));
-
-      return { siteInfo, authors, posts };
+      return { siteInfo, authors, posts, attachments };
     }
 
     function getTextContent(parent, tagName) {
@@ -155,101 +146,249 @@
     function getCDataContent(parent, tagName, namespace = null) {
       let el;
       if (namespace) {
-        // For namespaced elements like content:encoded
-        el = Array.from(parent.children).find(child => 
-          child.localName === tagName && child.namespaceURI?.includes(namespace)
-        );
+        el = Array.from(parent.children).find(child => child.localName === tagName && child.namespaceURI?.includes(namespace));
       } else {
-        el = Array.from(parent.children).find(child => 
-          child.localName === tagName || child.tagName.endsWith(':' + tagName)
-        );
+        el = Array.from(parent.children).find(child => child.localName === tagName || child.tagName.endsWith(':' + tagName));
       }
       return el ? el.textContent : '';
     }
 
-    // Export to JSON
-    function exportToJSON(posts, siteInfo) {
-      const exportData = {
-        siteInfo,
-        exportedAt: new Date().toISOString(),
-        postCount: posts.length,
-        posts: posts.map(post => ({
-          id: post.id,
-          title: post.title,
-          link: post.link,
-          author: post.authorName,
-          publishDate: post.postDate,
-          status: post.status,
-          categories: post.categories,
-          content: post.content,
-          excerpt: post.excerpt
-        }))
-      };
-      
-      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-      downloadBlob(blob, `wordpress-export-${Date.now()}.json`);
+    function getPostMeta(item, metaKey) {
+      const metaElements = item.querySelectorAll('postmeta');
+      for (const meta of metaElements) {
+        if (getCDataContent(meta, 'meta_key') === metaKey) return getCDataContent(meta, 'meta_value');
+      }
+      return null;
     }
 
-    // Export to CSV
-    function exportToCSV(posts) {
-      const headers = ['ID', 'Title', 'Author', 'Publish Date', 'Status', 'Categories', 'Link', 'Content Preview'];
-      
-      const escapeCSV = (str) => {
-        if (str === null || str === undefined) return '';
-        const stringVal = String(str);
-        if (stringVal.includes(',') || stringVal.includes('"') || stringVal.includes('\n')) {
-          return `"${stringVal.replace(/"/g, '""')}"`;
-        }
-        return stringVal;
-      };
-      
-      const rows = posts.map(post => [
-        post.id,
-        post.title,
-        post.authorName,
-        post.postDate,
-        post.status,
-        post.categories.join('; '),
-        post.link,
-        stripHtml(post.content).substring(0, 500).replace(/\n/g, ' ')
-      ].map(escapeCSV).join(','));
-      
-      const csv = [headers.join(','), ...rows].join('\n');
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-      downloadBlob(blob, `wordpress-export-${Date.now()}.csv`);
-    }
-
-    // Download helper
-    function downloadBlob(blob, filename) {
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-    }
-
-    // Format date nicely
-    function formatDate(dateString) {
-      if (!dateString) return '';
-      const date = new Date(dateString);
-      return date.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
+    function getAllPostMeta(item) {
+      const metaElements = item.querySelectorAll('postmeta');
+      const meta = {};
+      metaElements.forEach(metaEl => {
+        const key = getCDataContent(metaEl, 'meta_key');
+        if (key) meta[key] = getCDataContent(metaEl, 'meta_value');
       });
+      return meta;
     }
 
-    // Strip HTML tags for preview
+    const FIELD_GROUPS = {
+      core: { label: 'Core Fields', fields: {
+        id: { label: 'Post ID', default: true }, title: { label: 'Title', default: true },
+        slug: { label: 'Slug', default: true }, link: { label: 'Permalink', default: true },
+        guid: { label: 'GUID', default: false },
+      }},
+      dates: { label: 'Dates', fields: {
+        postDate: { label: 'Publish Date', default: true },
+        postDateGmt: { label: 'Publish Date (GMT)', default: false },
+        modifiedDate: { label: 'Modified Date', default: false },
+        modifiedDateGmt: { label: 'Modified Date (GMT)', default: false },
+      }},
+      author: { label: 'Author', fields: {
+        authorName: { label: 'Author Name', default: true },
+        creator: { label: 'Author Username', default: false },
+        authorEmail: { label: 'Author Email', default: false },
+      }},
+      content: { label: 'Content', fields: {
+        content: { label: 'Content (HTML)', default: true },
+        excerpt: { label: 'Excerpt', default: true },
+      }},
+      status: { label: 'Status & Settings', fields: {
+        status: { label: 'Status', default: true },
+        commentStatus: { label: 'Comment Status', default: false },
+        pingStatus: { label: 'Ping Status', default: false },
+        postPassword: { label: 'Password', default: false },
+        isSticky: { label: 'Is Sticky', default: false },
+        menuOrder: { label: 'Menu Order', default: false },
+      }},
+      relationships: { label: 'Relationships', fields: {
+        parentId: { label: 'Parent Post ID', default: false },
+      }},
+      taxonomies: { label: 'Taxonomies', fields: {
+        categories: { label: 'Categories', default: true },
+        tags: { label: 'Tags', default: true },
+      }},
+      media: { label: 'Media', fields: {
+        featuredImage: { label: 'Featured Image', default: true },
+      }},
+      meta: { label: 'Custom Fields', fields: {
+        customFields: { label: 'Custom Fields (user-defined)', default: false },
+        allMeta: { label: 'All Post Meta (includes internal)', default: false },
+      }},
+    };
+
+    function getDefaultSelectedFields() {
+      const selected = {};
+      Object.values(FIELD_GROUPS).forEach(group => {
+        Object.entries(group.fields).forEach(([key, field]) => { selected[key] = field.default; });
+      });
+      return selected;
+    }
+
     function stripHtml(html) {
       const tmp = document.createElement('div');
       tmp.innerHTML = html;
       return tmp.textContent || tmp.innerText || '';
     }
 
-    // Main App Component
+    function formatDate(dateString) {
+      if (!dateString) return '';
+      return new Date(dateString).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    }
+
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url; link.download = filename;
+      document.body.appendChild(link); link.click();
+      document.body.removeChild(link); URL.revokeObjectURL(url);
+    }
+
+    function exportToJSON(posts, siteInfo, selectedFields) {
+      const filteredPosts = posts.map(post => {
+        const filtered = {};
+        Object.entries(selectedFields).forEach(([key, isSelected]) => {
+          if (isSelected && post[key] !== undefined) filtered[key] = post[key];
+        });
+        return filtered;
+      });
+      const exportData = { siteInfo, exportedAt: new Date().toISOString(), postCount: filteredPosts.length, posts: filteredPosts };
+      downloadBlob(new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' }), `wordpress-export-${Date.now()}.json`);
+    }
+
+    function exportToCSV(posts, selectedFields) {
+      const activeFields = Object.entries(selectedFields).filter(([_, sel]) => sel).map(([key]) => key);
+      const headers = activeFields.map(key => {
+        for (const group of Object.values(FIELD_GROUPS)) if (group.fields[key]) return group.fields[key].label;
+        return key;
+      });
+      const escapeCSV = (str) => {
+        if (str === null || str === undefined) return '';
+        const s = String(str);
+        return (s.includes(',') || s.includes('"') || s.includes('\n')) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const formatValue = (value, key) => {
+        if (value === null || value === undefined) return '';
+        if (key === 'categories' || key === 'tags') return Array.isArray(value) ? value.map(v => v.name || v).join('; ') : '';
+        if (key === 'featuredImage') return value ? value.url : '';
+        if (key === 'customFields' || key === 'allMeta') return JSON.stringify(value);
+        if (key === 'content') return stripHtml(String(value)).substring(0, 1000).replace(/\n/g, ' ');
+        if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+        return String(value);
+      };
+      const rows = posts.map(post => activeFields.map(key => escapeCSV(formatValue(post[key], key))).join(','));
+      downloadBlob(new Blob(['\ufeff' + [headers.map(escapeCSV).join(','), ...rows].join('\n')], { type: 'text/csv;charset=utf-8;' }), `wordpress-export-${Date.now()}.csv`);
+    }
+
+    const Logo = () => (
+      <div className="font-mono text-xl font-bold text-gray-900 tracking-tight">
+        <span className="text-blue-600">&lt;</span>WP<span className="text-blue-600">/</span>Export<span className="text-blue-600">&gt;</span>
+      </div>
+    );
+
+    const GitHubLink = ({ className = "" }) => (
+      <a href="https://github.com/raykeating/wp-export" target="_blank" rel="noopener noreferrer"
+        className={`flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors ${className}`}>
+        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+          <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
+        </svg>
+        <span className="hidden sm:inline">GitHub</span>
+      </a>
+    );
+
+    const Footer = () => (
+      <footer className="bg-white border-t border-gray-200 py-4">
+        <div className="max-w-4xl mx-auto px-6 text-center text-sm text-gray-500">
+          Open source tool by <a href="https://github.com/raykeating/wp-export" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Ray Keating</a> · Your data never leaves your browser
+        </div>
+      </footer>
+    );
+
+    function FieldSelector({ selectedFields, setSelectedFields, onContinue, onBack, postCount }) {
+      const toggleField = (key) => setSelectedFields(prev => ({ ...prev, [key]: !prev[key] }));
+      const toggleGroup = (groupKey) => {
+        const fieldKeys = Object.keys(FIELD_GROUPS[groupKey].fields);
+        const allSelected = fieldKeys.every(key => selectedFields[key]);
+        setSelectedFields(prev => {
+          const updated = { ...prev };
+          fieldKeys.forEach(key => { updated[key] = !allSelected; });
+          return updated;
+        });
+      };
+      const selectAll = () => {
+        const all = {};
+        Object.values(FIELD_GROUPS).forEach(g => Object.keys(g.fields).forEach(k => { all[k] = true; }));
+        setSelectedFields(all);
+      };
+      const selectNone = () => {
+        const none = {};
+        Object.values(FIELD_GROUPS).forEach(g => Object.keys(g.fields).forEach(k => { none[k] = false; }));
+        setSelectedFields(none);
+      };
+      const selectedCount = Object.values(selectedFields).filter(Boolean).length;
+
+      return (
+        <div className="min-h-screen flex flex-col">
+          <header className="bg-white border-b border-gray-200">
+            <div className="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between">
+              <Logo /><GitHubLink />
+            </div>
+          </header>
+          <main className="flex-1 py-8">
+            <div className="max-w-4xl mx-auto px-6">
+              <div className="mb-6">
+                <button onClick={onBack} className="flex items-center gap-2 text-gray-600 hover:text-gray-900 mb-4">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+                  Back
+                </button>
+                <h1 className="text-2xl font-bold text-gray-900 mb-2">Select Fields to Export</h1>
+                <p className="text-gray-600">Choose which data to include. Found <strong>{postCount} posts</strong>.</p>
+              </div>
+              <div className="flex gap-3 mb-6">
+                <button onClick={selectAll} className="px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 rounded-lg">Select All</button>
+                <button onClick={selectNone} className="px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">Select None</button>
+                <span className="ml-auto text-sm text-gray-500">{selectedCount} fields selected</span>
+              </div>
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 mb-8">
+                {Object.entries(FIELD_GROUPS).map(([groupKey, group]) => {
+                  const fieldKeys = Object.keys(group.fields);
+                  const selectedInGroup = fieldKeys.filter(key => selectedFields[key]).length;
+                  const allSelected = selectedInGroup === fieldKeys.length;
+                  const someSelected = selectedInGroup > 0 && !allSelected;
+                  return (
+                    <div key={groupKey} className="bg-white border border-gray-200 rounded-xl p-4">
+                      <label className="flex items-center gap-3 mb-3 cursor-pointer">
+                        <input type="checkbox" checked={allSelected} ref={el => { if (el) el.indeterminate = someSelected; }}
+                          onChange={() => toggleGroup(groupKey)} className="w-4 h-4 rounded border-gray-300 text-blue-600" />
+                        <span className="font-semibold text-gray-900">{group.label}</span>
+                        <span className="text-xs text-gray-500 ml-auto">{selectedInGroup}/{fieldKeys.length}</span>
+                      </label>
+                      <div className="space-y-2 pl-7">
+                        {Object.entries(group.fields).map(([fieldKey, field]) => (
+                          <label key={fieldKey} className="flex items-center gap-2 cursor-pointer text-sm">
+                            <input type="checkbox" checked={selectedFields[fieldKey] || false} onChange={() => toggleField(fieldKey)}
+                              className="w-3.5 h-3.5 rounded border-gray-300 text-blue-600" />
+                            <span className="text-gray-700">{field.label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex justify-end">
+                <button onClick={onContinue} disabled={selectedCount === 0}
+                  className="px-6 py-3 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2">
+                  Continue to Preview
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                </button>
+              </div>
+            </div>
+          </main>
+          <Footer />
+        </div>
+      );
+    }
+
     function App() {
       const [data, setData] = useState(null);
       const [selectedPost, setSelectedPost] = useState(null);
@@ -258,161 +397,88 @@
       const [statusFilter, setStatusFilter] = useState('all');
       const [error, setError] = useState(null);
       const [isDragging, setIsDragging] = useState(false);
+      const [step, setStep] = useState('upload');
+      const [selectedFields, setSelectedFields] = useState(getDefaultSelectedFields());
 
       const handleFile = useCallback((file) => {
         if (!file) return;
-        
         const reader = new FileReader();
         reader.onload = (e) => {
           try {
-            const result = parseWordPressXML(e.target.result);
-            setData(result);
-            setError(null);
-            setSelectedPost(null);
-          } catch (err) {
-            setError(err.message);
-            setData(null);
-          }
+            setData(parseWordPressXML(e.target.result));
+            setError(null); setSelectedPost(null); setStep('select-fields');
+          } catch (err) { setError(err.message); setData(null); }
         };
         reader.readAsText(file);
       }, []);
 
       const handleDrop = useCallback((e) => {
-        e.preventDefault();
-        setIsDragging(false);
+        e.preventDefault(); setIsDragging(false);
         const file = e.dataTransfer.files[0];
-        if (file && file.name.endsWith('.xml')) {
-          handleFile(file);
-        } else {
-          setError('Please upload an XML file');
-        }
+        if (file?.name.endsWith('.xml')) handleFile(file);
+        else setError('Please upload an XML file');
       }, [handleFile]);
 
-      const handleDragOver = useCallback((e) => {
-        e.preventDefault();
-        setIsDragging(true);
-      }, []);
+      const resetApp = () => {
+        setData(null); setError(null); setStep('upload');
+        setSelectedFields(getDefaultSelectedFields());
+        setSearchTerm(''); setSelectedCategory('all'); setStatusFilter('all'); setSelectedPost(null);
+      };
 
-      const handleDragLeave = useCallback((e) => {
-        e.preventDefault();
-        setIsDragging(false);
-      }, []);
-
-      // Get unique categories
-      const allCategories = data ? [...new Set(data.posts.flatMap(p => p.categories))].sort() : [];
-      
-      // Get unique statuses
+      const allCategories = data ? [...new Set(data.posts.flatMap(p => p.categories.map(c => c.name)))].sort() : [];
       const allStatuses = data ? [...new Set(data.posts.map(p => p.status))].sort() : [];
-
-      // Filter posts
       const filteredPosts = data?.posts.filter(post => {
-        const matchesSearch = searchTerm === '' || 
-          post.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          stripHtml(post.content).toLowerCase().includes(searchTerm.toLowerCase());
-        const matchesCategory = selectedCategory === 'all' || post.categories.includes(selectedCategory);
+        const matchesSearch = searchTerm === '' || post.title.toLowerCase().includes(searchTerm.toLowerCase()) || stripHtml(post.content).toLowerCase().includes(searchTerm.toLowerCase());
+        const matchesCategory = selectedCategory === 'all' || post.categories.some(c => c.name === selectedCategory);
         const matchesStatus = statusFilter === 'all' || post.status === statusFilter;
         return matchesSearch && matchesCategory && matchesStatus;
       }) || [];
 
       // Upload Screen
-      if (!data) {
+      if (step === 'upload') {
         return (
           <div className="min-h-screen flex flex-col">
-            {/* Header */}
             <header className="bg-white border-b border-gray-200">
-              <div className="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between">
-                <div className="font-mono text-xl font-bold text-gray-900 tracking-tight">
-                  <span className="text-blue-600">&lt;</span>WP<span className="text-blue-600">/</span>Export<span className="text-blue-600">&gt;</span>
-                </div>
-                <a 
-                  href="https://github.com/raykeating/wp-export" 
-                  target="_blank" 
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors"
-                >
-                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                    <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
-                  </svg>
-                  GitHub
-                </a>
-              </div>
+              <div className="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between"><Logo /><GitHubLink /></div>
             </header>
-
-            {/* Main Content */}
             <main className="flex-1 flex items-center justify-center p-8">
               <div className="w-full max-w-2xl">
-                {/* Upload Area */}
-                <div 
-                  className={`p-12 border-2 border-dashed rounded-2xl text-center transition-colors mb-8 ${
-                    isDragging ? 'border-blue-500 bg-blue-50' : 'border-gray-300 bg-white'
-                  }`}
-                  onDrop={handleDrop}
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
-                >
-                  <div className="mb-6">
-                    <svg className="mx-auto h-16 w-16 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                    </svg>
-                  </div>
+                <div className={`p-12 border-2 border-dashed rounded-2xl text-center transition-colors mb-8 ${isDragging ? 'border-blue-500 bg-blue-50' : 'border-gray-300 bg-white'}`}
+                  onDrop={handleDrop} onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }} onDragLeave={(e) => { e.preventDefault(); setIsDragging(false); }}>
+                  <svg className="mx-auto h-16 w-16 text-gray-400 mb-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                  </svg>
                   <h1 className="text-2xl font-bold text-gray-900 mb-2">WordPress to JSON & CSV Converter</h1>
                   <p className="text-gray-600 mb-6">Drop your WordPress XML export file here or click to browse</p>
-                  <input
-                    type="file"
-                    accept=".xml"
-                    onChange={(e) => handleFile(e.target.files[0])}
-                    className="hidden"
-                    id="file-input"
-                  />
-                  <label
-                    htmlFor="file-input"
-                    className="inline-flex items-center px-6 py-3 bg-blue-600 text-white font-medium rounded-lg cursor-pointer hover:bg-blue-700 transition-colors"
-                  >
-                    Select XML File
-                  </label>
-                  {error && (
-                    <div className="mt-6 p-4 bg-red-50 text-red-700 rounded-lg">
-                      {error}
-                    </div>
-                  )}
+                  <input type="file" accept=".xml" onChange={(e) => handleFile(e.target.files[0])} className="hidden" id="file-input" />
+                  <label htmlFor="file-input" className="inline-flex items-center px-6 py-3 bg-blue-600 text-white font-medium rounded-lg cursor-pointer hover:bg-blue-700">Select XML File</label>
+                  {error && <div className="mt-6 p-4 bg-red-50 text-red-700 rounded-lg">{error}</div>}
                 </div>
-
-                {/* Instructions */}
                 <div className="bg-gray-50 rounded-xl p-6 border border-gray-200">
                   <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                    <svg className="w-5 h-5 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
+                    <svg className="w-5 h-5 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                     How to export your WordPress posts
                   </h2>
                   <ol className="space-y-3 text-gray-600">
-                    <li className="flex gap-3">
-                      <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-sm font-medium">1</span>
-                      <span>Go to your WordPress admin export page:<br/>
-                        <code className="text-sm bg-gray-200 px-2 py-1 rounded mt-1 inline-block">https://yoursite.com/wp-admin/export.php</code>
-                      </span>
-                    </li>
-                    <li className="flex gap-3">
-                      <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-sm font-medium">2</span>
-                      <span>Select <strong>"Posts"</strong> and click "Download Export File"</span>
-                    </li>
-                    <li className="flex gap-3">
-                      <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-sm font-medium">3</span>
-                      <span>Upload the downloaded XML file here to view, search, and export to JSON or CSV</span>
-                    </li>
+                    <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-sm font-medium">1</span>
+                      <span>Go to: <code className="text-sm bg-gray-200 px-2 py-1 rounded">https://yoursite.com/wp-admin/export.php</code></span></li>
+                    <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-sm font-medium">2</span>
+                      <span>Select <strong>"Posts"</strong> and click "Download Export File"</span></li>
+                    <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-sm font-medium">3</span>
+                      <span>Upload the XML file here to view, search, and export to JSON or CSV</span></li>
                   </ol>
                 </div>
               </div>
             </main>
-
-            {/* Footer */}
-            <footer className="bg-white border-t border-gray-200 py-4">
-              <div className="max-w-4xl mx-auto px-6 text-center text-sm text-gray-500">
-                Open source tool by <a href="https://github.com/raykeating/wp-export" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Ray Keating</a> · Your data never leaves your browser
-              </div>
-            </footer>
+            <Footer />
           </div>
         );
+      }
+
+      // Field Selection Screen
+      if (step === 'select-fields') {
+        return <FieldSelector selectedFields={selectedFields} setSelectedFields={setSelectedFields}
+          onContinue={() => setStep('preview')} onBack={resetApp} postCount={data?.posts.length || 0} />;
       }
 
       // Post Detail View
@@ -422,69 +488,38 @@
             <div className="sticky top-0 bg-white border-b border-gray-200 z-10">
               <div className="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between">
                 <div className="flex items-center gap-4">
-                  <div className="font-mono text-xl font-bold text-gray-900 tracking-tight">
-                    <span className="text-blue-600">&lt;</span>WP<span className="text-blue-600">/</span>Export<span className="text-blue-600">&gt;</span>
-                  </div>
-                  <button
-                    onClick={() => setSelectedPost(null)}
-                    className="flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors"
-                  >
-                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                    </svg>
-                    Back to posts
+                  <Logo />
+                  <button onClick={() => setSelectedPost(null)} className="flex items-center gap-2 text-gray-600 hover:text-gray-900">
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+                    Back
                   </button>
                 </div>
-                <a 
-                  href="https://github.com/raykeating/wp-export" 
-                  target="_blank" 
-                  rel="noopener noreferrer"
-                  className="p-2 text-gray-500 hover:text-gray-700 transition-colors"
-                  title="View on GitHub"
-                >
-                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                    <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
-                  </svg>
-                </a>
+                <GitHubLink />
               </div>
             </div>
             <article className="max-w-4xl mx-auto px-6 py-8">
               <header className="mb-8">
-                <div className="flex items-center gap-2 mb-4">
-                  <span className={`px-2 py-1 text-xs font-medium rounded ${
-                    selectedPost.status === 'publish' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
-                  }`}>
-                    {selectedPost.status}
-                  </span>
-                  {selectedPost.categories.map(cat => (
-                    <span key={cat} className="px-2 py-1 text-xs font-medium bg-gray-100 text-gray-600 rounded">
-                      {cat}
-                    </span>
-                  ))}
+                <div className="flex flex-wrap items-center gap-2 mb-4">
+                  <span className={`px-2 py-1 text-xs font-medium rounded ${selectedPost.status === 'publish' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>{selectedPost.status}</span>
+                  {selectedPost.categories.map(cat => <span key={cat.slug} className="px-2 py-1 text-xs font-medium bg-gray-100 text-gray-600 rounded">{cat.name}</span>)}
+                  {selectedPost.tags.map(tag => <span key={tag.slug} className="px-2 py-1 text-xs font-medium bg-blue-50 text-blue-600 rounded">#{tag.name}</span>)}
                 </div>
                 <h1 className="text-4xl font-bold text-gray-900 mb-4">{selectedPost.title}</h1>
-                <div className="flex items-center gap-4 text-gray-600">
-                  <span>{selectedPost.authorName}</span>
-                  <span>•</span>
-                  <time>{formatDate(selectedPost.postDate)}</time>
-                </div>
+                <div className="flex items-center gap-4 text-gray-600"><span>{selectedPost.authorName}</span><span>•</span><time>{formatDate(selectedPost.postDate)}</time></div>
+                {selectedPost.featuredImage && <img src={selectedPost.featuredImage.url} alt={selectedPost.featuredImage.alt || selectedPost.title} className="w-full h-64 object-cover rounded-lg mt-6" />}
               </header>
-              <div 
-                className="prose prose-lg max-w-none"
-                dangerouslySetInnerHTML={{ __html: selectedPost.content.replace(/\n/g, '<br>') }}
-              />
-              {selectedPost.link && (
+              <div className="prose prose-lg max-w-none" dangerouslySetInnerHTML={{ __html: selectedPost.content.replace(/\n/g, '<br>') }} />
+              {Object.keys(selectedPost.customFields).length > 0 && (
                 <div className="mt-8 pt-8 border-t border-gray-200">
-                  <a 
-                    href={selectedPost.link} 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    className="text-blue-600 hover:text-blue-800"
-                  >
-                    View original post →
-                  </a>
+                  <h3 className="font-semibold text-gray-900 mb-4">Custom Fields</h3>
+                  <dl className="grid grid-cols-2 gap-4">
+                    {Object.entries(selectedPost.customFields).map(([key, value]) => (
+                      <div key={key}><dt className="text-sm text-gray-500">{key}</dt><dd className="text-gray-900">{String(value).substring(0, 100)}</dd></div>
+                    ))}
+                  </dl>
                 </div>
               )}
+              {selectedPost.link && <div className="mt-8 pt-8 border-t border-gray-200"><a href={selectedPost.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">View original post →</a></div>}
             </article>
           </div>
         );
@@ -493,154 +528,76 @@
       // Posts List View
       return (
         <div className="min-h-screen">
-          {/* Header */}
           <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
             <div className="max-w-6xl mx-auto px-6 py-4">
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-6">
-                  <div className="font-mono text-xl font-bold text-gray-900 tracking-tight">
-                    <span className="text-blue-600">&lt;</span>WP<span className="text-blue-600">/</span>Export<span className="text-blue-600">&gt;</span>
-                  </div>
+                  <Logo />
                   <div className="hidden sm:block">
                     <h1 className="text-lg font-semibold text-gray-900">{data.siteInfo.title}</h1>
                     <p className="text-gray-500 text-sm">{data.siteInfo.description}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                <a 
-                  href="https://github.com/raykeating/wp-export" 
-                  target="_blank" 
-                  rel="noopener noreferrer"
-                  className="p-2 text-gray-500 hover:text-gray-700 transition-colors"
-                  title="View on GitHub"
-                >
-                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                    <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
-                  </svg>
-                </a>
-                <div className="relative group">
-                  <button
-                    className="px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
-                  >
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
-                    Export
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
-                  </button>
-                  <div className="absolute right-0 mt-1 w-48 bg-white border border-gray-200 rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-20">
-                    <button
-                      onClick={() => exportToJSON(filteredPosts, data.siteInfo)}
-                      className="w-full px-4 py-3 text-left text-gray-700 hover:bg-gray-50 rounded-t-lg flex items-center gap-3"
-                    >
-                      <span className="text-lg">{ }</span>
-                      <div>
-                        <div className="font-medium">Export as JSON</div>
-                        <div className="text-xs text-gray-500">Full data with content</div>
-                      </div>
+                  <GitHubLink className="p-2" />
+                  <button onClick={() => setStep('select-fields')} className="px-3 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg text-sm">Edit Fields</button>
+                  <div className="relative group">
+                    <button className="px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 flex items-center gap-2">
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                      Export
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
                     </button>
-                    <button
-                      onClick={() => exportToCSV(filteredPosts)}
-                      className="w-full px-4 py-3 text-left text-gray-700 hover:bg-gray-50 rounded-b-lg border-t border-gray-100 flex items-center gap-3"
-                    >
-                      <span className="text-lg">📊</span>
-                      <div>
-                        <div className="font-medium">Export as CSV</div>
-                        <div className="text-xs text-gray-500">Spreadsheet compatible</div>
-                      </div>
-                    </button>
+                    <div className="absolute right-0 mt-1 w-48 bg-white border border-gray-200 rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-20">
+                      <button onClick={() => exportToJSON(filteredPosts, data.siteInfo, selectedFields)} className="w-full px-4 py-3 text-left text-gray-700 hover:bg-gray-50 rounded-t-lg">
+                        <div className="font-medium">Export as JSON</div><div className="text-xs text-gray-500">Full data with content</div>
+                      </button>
+                      <button onClick={() => exportToCSV(filteredPosts, selectedFields)} className="w-full px-4 py-3 text-left text-gray-700 hover:bg-gray-50 rounded-b-lg border-t border-gray-100">
+                        <div className="font-medium">Export as CSV</div><div className="text-xs text-gray-500">Spreadsheet compatible</div>
+                      </button>
+                    </div>
                   </div>
+                  <button onClick={resetApp} className="px-4 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg">New File</button>
                 </div>
-                <button
-                  onClick={() => { setData(null); setError(null); }}
-                  className="px-4 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
-                >
-                  New File
-                </button>
               </div>
-              </div>
-              
-              {/* Filters */}
               <div className="flex flex-wrap gap-4">
-                <div className="flex-1 min-w-[200px]">
-                  <input
-                    type="text"
-                    placeholder="Search posts..."
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-                  />
-                </div>
-                <select
-                  value={selectedCategory}
-                  onChange={(e) => setSelectedCategory(e.target.value)}
-                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
-                >
+                <input type="text" placeholder="Search posts..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
+                  className="flex-1 min-w-[200px] px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none" />
+                <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)} className="px-4 py-2 border border-gray-300 rounded-lg bg-white">
                   <option value="all">All Categories</option>
-                  {allCategories.map(cat => (
-                    <option key={cat} value={cat}>{cat}</option>
-                  ))}
+                  {allCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
                 </select>
-                <select
-                  value={statusFilter}
-                  onChange={(e) => setStatusFilter(e.target.value)}
-                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
-                >
+                <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="px-4 py-2 border border-gray-300 rounded-lg bg-white">
                   <option value="all">All Statuses</option>
-                  {allStatuses.map(status => (
-                    <option key={status} value={status}>{status}</option>
-                  ))}
+                  {allStatuses.map(s => <option key={s} value={s}>{s}</option>)}
                 </select>
               </div>
             </div>
           </header>
-
-          {/* Stats */}
           <div className="max-w-6xl mx-auto px-6 py-4">
             <div className="flex gap-6 text-sm text-gray-600">
               <span><strong>{filteredPosts.length}</strong> posts</span>
               <span><strong>{Object.keys(data.authors).length}</strong> authors</span>
               <span><strong>{allCategories.length}</strong> categories</span>
+              <span><strong>{Object.keys(data.attachments).length}</strong> media items</span>
             </div>
           </div>
-
-          {/* Posts Grid */}
           <main className="max-w-6xl mx-auto px-6 pb-12">
             {filteredPosts.length === 0 ? (
-              <div className="text-center py-12 text-gray-500">
-                No posts found matching your criteria
-              </div>
+              <div className="text-center py-12 text-gray-500">No posts found matching your criteria</div>
             ) : (
               <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
                 {filteredPosts.map(post => (
-                  <article
-                    key={post.id}
-                    onClick={() => setSelectedPost(post)}
-                    className="bg-white rounded-xl border border-gray-200 p-6 cursor-pointer hover:shadow-lg hover:border-gray-300 transition-all"
-                  >
-                    <div className="flex items-center gap-2 mb-3">
-                      <span className={`px-2 py-0.5 text-xs font-medium rounded ${
-                        post.status === 'publish' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
-                      }`}>
-                        {post.status}
-                      </span>
-                      {post.categories.slice(0, 2).map(cat => (
-                        <span key={cat} className="px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600 rounded">
-                          {cat}
-                        </span>
-                      ))}
-                    </div>
-                    <h2 className="text-lg font-semibold text-gray-900 mb-2 line-clamp-2">
-                      {post.title}
-                    </h2>
-                    <p className="text-gray-600 text-sm mb-4 line-clamp-3">
-                      {stripHtml(post.content).substring(0, 200)}...
-                    </p>
-                    <div className="flex items-center justify-between text-xs text-gray-500">
-                      <span>{post.authorName}</span>
-                      <time>{formatDate(post.postDate)}</time>
+                  <article key={post.id} onClick={() => setSelectedPost(post)}
+                    className="bg-white rounded-xl border border-gray-200 overflow-hidden cursor-pointer hover:shadow-lg hover:border-gray-300 transition-all">
+                    {post.featuredImage && <img src={post.featuredImage.url} alt={post.featuredImage.alt || post.title} className="w-full h-40 object-cover" />}
+                    <div className="p-6">
+                      <div className="flex flex-wrap items-center gap-2 mb-3">
+                        <span className={`px-2 py-0.5 text-xs font-medium rounded ${post.status === 'publish' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>{post.status}</span>
+                        {post.categories.slice(0, 2).map(cat => <span key={cat.slug} className="px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600 rounded">{cat.name}</span>)}
+                      </div>
+                      <h2 className="text-lg font-semibold text-gray-900 mb-2 line-clamp-2">{post.title}</h2>
+                      <p className="text-gray-600 text-sm mb-4 line-clamp-3">{stripHtml(post.content).substring(0, 200)}...</p>
+                      <div className="flex items-center justify-between text-xs text-gray-500"><span>{post.authorName}</span><time>{formatDate(post.postDate)}</time></div>
                     </div>
                   </article>
                 ))}
@@ -651,9 +608,7 @@
       );
     }
 
-    // Render the app
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<App />);
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
   </script>
 </body>
 </html>
